@@ -5,7 +5,7 @@ from datetime import datetime
 import io
 
 # --- КОНФИГУРАЦИЯ ---
-st.set_page_config(page_title="GMP Cross-Check (Manual Mode)", layout="wide")
+st.set_page_config(page_title="GMP Cross-Check (Fixed)", layout="wide")
 
 # --- ФУНКЦИИ ---
 def clean_text(text):
@@ -41,7 +41,6 @@ def load_file_raw(uploaded_file):
     """Читает файл максимально 'сырым' образом"""
     try:
         if uploaded_file.name.lower().endswith('.csv'):
-            # Пробуем разные кодировки
             for enc in ['utf-8', 'cp1251', 'latin1']:
                 try:
                     uploaded_file.seek(0)
@@ -54,17 +53,36 @@ def load_file_raw(uploaded_file):
     return None
 
 def preprocess_dataframe(df, keywords_hint):
-    """Пытается найти заголовок и установить его"""
+    """Пытается найти заголовок и корректно установить его"""
     header_idx = find_header_row_idx(df, keywords_hint)
+    
     if header_idx is not None:
-        df.columns = df.iloc[header_idx]
+        # Берем строку заголовков
+        new_header = df.iloc[header_idx]
+        
+        # !!! ВАЖНОЕ ИСПРАВЛЕНИЕ: Заполняем пустоты и приводим к строке !!!
+        new_header = new_header.fillna(f"Unnamed").astype(str).str.strip()
+        
+        # Если есть дубликаты названий, pandas может сбоить, делаем уникальными
+        if new_header.duplicated().any():
+             counts = {}
+             unique_header = []
+             for col in new_header:
+                 cur_count = counts.get(col, 0)
+                 if cur_count > 0:
+                     unique_header.append(f"{col}_{cur_count}")
+                 else:
+                     unique_header.append(col)
+                 counts[col] = cur_count + 1
+             df.columns = unique_header
+        else:
+             df.columns = new_header
+
         df = df.iloc[header_idx+1:].reset_index(drop=True)
-        # Убираем дубликаты колонок, если есть
-        df = df.loc[:, ~df.columns.duplicated()]
         return df, True
     else:
-        # Если заголовок не нашли, даем имена Col_0, Col_1...
-        df.columns = [f"Col_{i}: {str(v)[:20]}..." for i, v in enumerate(df.iloc[0])]
+        # Если заголовок не нашли
+        df.columns = [f"Col_{i}" for i in range(df.shape[1])]
         return df, False
 
 def highlight_rows(row):
@@ -72,8 +90,8 @@ def highlight_rows(row):
     return [f'background-color: {color}'] * len(row)
 
 # --- ИНТЕРФЕЙС ---
-st.title("🛠️ GMP Cross-Check: Ручная настройка")
-st.markdown("Если автоматика ошибается, укажите колонки вручную.")
+st.title("🛠️ GMP Cross-Check: Stable Version")
+st.markdown("Ручная настройка колонок для максимальной точность.")
 
 col_main1, col_main2 = st.columns(2)
 
@@ -89,21 +107,19 @@ with col_main1:
     if file_reg:
         df_raw_reg = load_file_raw(file_reg)
         if df_raw_reg is not None:
-            # Пытаемся найти заголовки
             df_reg, found = preprocess_dataframe(df_raw_reg, ["торговое", "наименование", "лекарственная"])
             
-            st.caption("Предпросмотр таблицы (первые 3 строки):")
+            st.caption("Предпросмотр:")
             st.dataframe(df_reg.head(3), use_container_width=True)
             
-            st.error("👇 ВЫБЕРИТЕ КОЛОНКИ НИЖЕ:")
+            st.warning("👇 УКАЖИТЕ КОЛОНКИ:")
             cols_reg = list(df_reg.columns)
             
-            # Пытаемся угадать индекс для селектора
             idx_n = next((i for i, c in enumerate(cols_reg) if 'наименование' in str(c).lower()), 0)
             idx_m = next((i for i, c in enumerate(cols_reg) if 'производител' in str(c).lower()), 0)
 
-            col_name_reg = st.selectbox("В какой колонке НАЗВАНИЕ?", cols_reg, index=idx_n, key="s1")
-            col_mfg_reg = st.selectbox("В какой колонке ПРОИЗВОДИТЕЛЬ?", cols_reg, index=idx_m, key="s2")
+            col_name_reg = st.selectbox("Колонка НАЗВАНИЕ:", cols_reg, index=idx_n, key="s1")
+            col_mfg_reg = st.selectbox("Колонка ПРОИЗВОДИТЕЛЬ:", cols_reg, index=idx_m, key="s2")
         else:
             st.error("Ошибка чтения файла")
 
@@ -122,20 +138,19 @@ with col_main2:
         if df_raw_gmp is not None:
             df_gmp, found = preprocess_dataframe(df_raw_gmp, ["перечень", "производител"])
             
-            st.caption("Предпросмотр таблицы (первые 3 строки):")
+            st.caption("Предпросмотр:")
             st.dataframe(df_gmp.head(3), use_container_width=True)
             
-            st.error("👇 ВЫБЕРИТЕ КОЛОНКИ НИЖЕ:")
+            st.warning("👇 УКАЖИТЕ КОЛОНКИ:")
             cols_gmp = list(df_gmp.columns)
             
-            # Угадываем индексы
             idx_l = next((i for i, c in enumerate(cols_gmp) if 'перечень' in str(c).lower()), 0)
             idx_d = next((i for i, c in enumerate(cols_gmp) if 'срок' in str(c).lower()), 0)
             idx_mf = next((i for i, c in enumerate(cols_gmp) if 'производител' in str(c).lower()), 0)
 
-            col_list_gmp = st.selectbox("В какой колонке СПИСОК ПРЕПАРАТОВ?", cols_gmp, index=idx_l, key="s3")
-            col_date_gmp = st.selectbox("В какой колонке СРОК ДЕЙСТВИЯ?", cols_gmp, index=idx_d, key="s4")
-            col_mfg_gmp = st.selectbox("В какой колонке ПРОИЗВОДИТЕЛЬ?", cols_gmp, index=idx_mf, key="s5")
+            col_list_gmp = st.selectbox("Колонка СПИСОК ПРЕПАРАТОВ:", cols_gmp, index=idx_l, key="s3")
+            col_date_gmp = st.selectbox("Колонка СРОК ДЕЙСТВИЯ:", cols_gmp, index=idx_d, key="s4")
+            col_mfg_gmp = st.selectbox("Колонка ПРОИЗВОДИТЕЛЬ:", cols_gmp, index=idx_mf, key="s5")
         else:
             st.error("Ошибка чтения файла")
 
@@ -154,12 +169,12 @@ if st.button("🚀 ЗАПУСТИТЬ АНАЛИЗ", type="primary"):
                     mfg = clean_text(row[col_mfg_gmp]).lower()
                     for d in drugs:
                         gmp_db.append({'drug': d, 'mfg': mfg, 'status': status, 'date': dt})
-                except: continue # Пропускаем битые строки
+                except: continue
             
             df_lookup = pd.DataFrame(gmp_db)
             
             if df_lookup.empty:
-                st.error("Не удалось извлечь ни одного препарата из базы GMP. Проверьте выбор колонки 'Список препаратов'.")
+                st.error("Не удалось извлечь препараты. Проверьте колонку 'Список препаратов'.")
             else:
                 # 2. ПРОВЕРЯЕМ СПИСОК РУ
                 results = []
@@ -171,7 +186,7 @@ if st.button("🚀 ЗАПУСТИТЬ АНАЛИЗ", type="primary"):
                     match_details = "Нет действующего сертификата"
                     bg_color = "#FECACA"
                     
-                    # Логика поиска (First Word Match)
+                    # Логика поиска (First Token)
                     tokens = re.split(r'[ \-\(\)\.\,]+', reg_name.lower())
                     search_key = next((t for t in tokens if len(t) > 2), "")
                     
@@ -202,13 +217,11 @@ if st.button("🚀 ЗАПУСТИТЬ АНАЛИЗ", type="primary"):
                 # 3. ВЫВОД
                 st.success("Готово!")
                 
-                # Метрики
                 ok_cnt = len(df_final[df_final['Статус'].str.contains("OK")])
                 k1, k2 = st.columns(2)
                 k1.metric("Всего проверено", len(df_final))
                 k2.metric("Разрешен ввоз", ok_cnt)
                 
-                # Таблица
                 styler = df_final.style.apply(highlight_rows, axis=1)
                 st.dataframe(
                     styler,
@@ -217,9 +230,8 @@ if st.button("🚀 ЗАПУСТИТЬ АНАЛИЗ", type="primary"):
                     height=800
                 )
                 
-                # Скачивание
                 csv = df_final.drop(columns=['_bg']).to_csv(index=False).encode('utf-8-sig')
-                st.download_button("Скачать результат (Excel/CSV)", csv, "report.csv", "text/csv", type="primary")
+                st.download_button("Скачать результат", csv, "report.csv", "text/csv", type="primary")
 
     else:
-        st.warning("Сначала загрузите файлы и выберите колонки.")
+        st.warning("Сначала загрузите файлы.")

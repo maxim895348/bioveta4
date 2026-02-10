@@ -5,28 +5,26 @@ from datetime import datetime
 import io
 
 # --- НАСТРОЙКИ ---
-st.set_page_config(page_title="GMP Auto-Audit", layout="wide")
+st.set_page_config(page_title="GMP Auto-Audit V10", layout="wide")
 
-# --- ФУНКЦИИ АВТО-ПИЛОТА ---
+# --- ФУНКЦИИ ---
 
 def clean_header(df):
-    """Лечит ошибку JSON: убирает пустые имена колонок"""
+    """Чистит заголовки от мусора и пустот"""
     df.columns = [str(c).strip() if pd.notna(c) and str(c).strip() != "" else f"Col_{i}" for i, c in enumerate(df.columns)]
     return df
 
 def find_header_row(df, keywords):
-    """Сканирует файл вниз, пока не найдет ключевые слова"""
+    """Ищет строку заголовка"""
     for i in range(min(50, len(df))):
         row_text = " ".join([str(x).lower() for x in df.iloc[i].values])
-        # Если нашли хотя бы 2 совпадения (например "производитель" и "наименование")
         if sum(1 for k in keywords if k in row_text) >= 1:
             return i
     return None
 
-def load_smart(uploaded_file, file_type):
-    """Умная загрузка: сама ищет шапку и данные"""
+def load_smart(uploaded_file):
+    """Читает файл и возвращает DataFrame + список найденных ключевых слов"""
     try:
-        # 1. Читаем сырые данные
         df = None
         if uploaded_file.name.lower().endswith('.csv'):
             for enc in ['utf-8', 'cp1251', 'latin1']:
@@ -38,38 +36,52 @@ def load_smart(uploaded_file, file_type):
         else:
             df = pd.read_excel(uploaded_file, header=None)
         
-        if df is None: return None, "Нечитаемый файл"
+        if df is None: return None, "Error"
 
-        # 2. Ищем заголовки (Определяем ключевые слова)
-        keywords = []
-        if file_type == "REG": keywords = ["торговое", "наименование", "лекарственная"]
-        else: keywords = ["перечень", "производител", "срок"]
+        # Пытаемся понять, что это за файл, по содержимому
+        header_idx = find_header_row(df, ["торговое", "наименование", "перечень", "производител", "срок"])
         
-        idx = find_header_row(df, keywords)
-        
-        if idx is not None:
-            # Нашли шапку - отрезаем лишнее сверху
-            df.columns = df.iloc[idx]
-            df = df.iloc[idx+1:].reset_index(drop=True)
-            df = clean_header(df) # Санитарная обработка имен
-            return df, None
-        
-        # Если шапку не нашли — возвращаем как есть (Blind mode), но чистим колонки
+        if header_idx is not None:
+            df.columns = df.iloc[header_idx]
+            df = df.iloc[header_idx+1:].reset_index(drop=True)
+            df = clean_header(df)
+            return df, "OK"
+            
         df = clean_header(df)
-        return df, "No Header Found"
+        return df, "No Header"
 
     except Exception as e:
         return None, str(e)
 
+def identify_file_type(df):
+    """Определяет роль файла: это список РУ (Target) или база GMP (Database)?"""
+    cols = " ".join([str(c).lower() for c in df.columns])
+    
+    # Признаки базы GMP
+    score_gmp = 0
+    if "перечень" in cols: score_gmp += 3
+    if "срок" in cols: score_gmp += 2
+    if "площадк" in cols: score_gmp += 2
+    
+    # Признаки списка РУ
+    score_reg = 0
+    if "торговое" in cols: score_reg += 3
+    if "лекарственная" in cols: score_reg += 2
+    if "мнн" in cols: score_reg += 1
+    
+    # Если непонятно по заголовкам, смотрим на размер
+    # Список РУ обычно маленький, GMP база огромная
+    if score_gmp == score_reg:
+        if len(df) > 1000: return "GMP"
+        else: return "REG"
+        
+    return "GMP" if score_gmp > score_reg else "REG"
+
 def get_col_by_keyword(df, keywords):
-    """Ищет колонку по смыслу, а не точному названию"""
     for col in df.columns:
         c_str = str(col).lower()
         if any(k in c_str for k in keywords):
             return col
-    # Если не нашли по имени, возвращаем по индексу (эвристика)
-    # Для РУ: 0 - Название, 1 - МНН, ... 6 - Производитель
-    # Для GMP: 1 - Производитель, 8 - Перечень
     return None
 
 def parse_date_status(date_str):
@@ -82,7 +94,7 @@ def parse_date_status(date_str):
             d = datetime.strptime(match.group(1), '%d.%m.%Y')
             return ("Active", d) if d > datetime.now() else ("Expired", d)
         except: pass
-    return "Active", None # Если даты нет, но и "истек" нет, считаем условно активным (риск)
+    return "Active", None
 
 def extract_drugs(text):
     if pd.isna(text): return []
@@ -92,23 +104,45 @@ def extract_drugs(text):
     return [d.strip().lower() for d in s.split(';') if len(d.strip()) > 2]
 
 # --- ИНТЕРФЕЙС ---
-st.title("⚡ GMP Auto-Audit (Без настроек)")
-st.markdown("Просто загрузи два файла. Система сама найдет колонки и сопоставит данные.")
+st.title("⚡ GMP Auto-Audit: Smart Filter")
+st.markdown("Загрузите файлы в любом порядке. Система сама поймет, где ваши 18 препаратов, а где база GMP.")
 
 c1, c2 = st.columns(2)
-f_reg = c1.file_uploader("1. Список РУ (Препараты)", key="f1")
-f_gmp = c2.file_uploader("2. База GMP (Иностранные)", key="f2")
+f1 = c1.file_uploader("Файл 1", key="f1")
+f2 = c2.file_uploader("Файл 2", key="f2")
 
-if f_reg and f_gmp:
-    with st.spinner("Автоматический анализ структуры файлов..."):
-        # 1. Загрузка
-        df_reg, msg1 = load_smart(f_reg, "REG")
-        df_gmp, msg2 = load_smart(f_gmp, "GMP")
+if f1 and f2:
+    with st.spinner("Распознавание файлов и анализ..."):
+        # 1. Загружаем оба файла
+        df_a, msg_a = load_smart(f1)
+        df_b, msg_b = load_smart(f2)
         
-        if df_reg is None or df_gmp is None:
-            st.error("Ошибка чтения файлов. Убедитесь, что это Excel/CSV.")
+        if df_a is None or df_b is None:
+            st.error("Ошибка чтения одного из файлов.")
         else:
-            # 2. Авто-определение колонок
+            # 2. Определяем кто есть кто
+            type_a = identify_file_type(df_a)
+            type_b = identify_file_type(df_b)
+            
+            df_reg = None
+            df_gmp = None
+            
+            # Логика распределения
+            if type_a == "REG" and type_b == "GMP":
+                df_reg, df_gmp = df_a, df_b
+            elif type_a == "GMP" and type_b == "REG":
+                df_reg, df_gmp = df_b, df_a
+            else:
+                # Если типы совпали, берем тот, что меньше, как REG
+                if len(df_a) < len(df_b):
+                    df_reg, df_gmp = df_a, df_b
+                else:
+                    df_reg, df_gmp = df_b, df_a
+            
+            # Сообщение пользователю
+            st.info(f"📁 Файл списка препаратов (обработаем {len(df_reg)} строк) | 📚 База GMP (справочник из {len(df_gmp)} записей)")
+            
+            # 3. Находим колонки
             # РУ
             col_name = get_col_by_keyword(df_reg, ["торговое", "наименование", "препарат"]) or df_reg.columns[0]
             col_mfg_reg = get_col_by_keyword(df_reg, ["производител", "фирма", "держатель"])
@@ -118,7 +152,7 @@ if f_reg and f_gmp:
             col_mfg_gmp = get_col_by_keyword(df_gmp, ["производител", "фирма"]) or df_gmp.columns[1]
             col_date = get_col_by_keyword(df_gmp, ["срок", "дата", "окончание"])
             
-            # 3. Создание базы поиска (Lookup)
+            # 4. Создаем Lookup базу
             gmp_db = []
             for _, row in df_gmp.iterrows():
                 try:
@@ -131,14 +165,13 @@ if f_reg and f_gmp:
             
             lookup = pd.DataFrame(gmp_db)
             
-            # 4. Анализ
+            # 5. Анализируем ТОЛЬКО df_reg (наши 18 строк)
             results = []
             for _, row in df_reg.iterrows():
                 r_name = str(row[col_name]).strip()
                 r_mfg = str(row[col_mfg_reg]).strip() if col_mfg_reg else ""
                 
-                # Логика поиска: Первое слово названия
-                # "Биокан DHPPi" -> "биокан"
+                # Логика поиска
                 tokens = re.split(r'[ \-\(\)\.\,]+', r_name.lower())
                 key = next((t for t in tokens if len(t) > 2), "")
                 
@@ -149,12 +182,11 @@ if f_reg and f_gmp:
                 if key and not lookup.empty:
                     hits = lookup[lookup['d'].str.contains(key, regex=False, na=False)]
                     if not hits.empty:
-                        # Проверяем активные
                         active = hits[hits['s'] == 'Active']
                         if not active.empty:
                             best = active.iloc[0]
                             status = "✅ OK"
-                            date_str = best['dt'].strftime('%d.%m.%Y') if best['dt'] else "Бессрочно/Активен"
+                            date_str = best['dt'].strftime('%d.%m.%Y') if best['dt'] else "Активен"
                             details = f"Действует до {date_str}"
                             bg = "#D1FAE5"
                         else:
@@ -172,9 +204,7 @@ if f_reg and f_gmp:
             
             final_df = pd.DataFrame(results)
             
-            # 5. Вывод
-            st.success(f"Анализ завершен. Проверено {len(final_df)} препаратов.")
-            
+            # 6. Вывод
             def color_rows(row):
                 return [f'background-color: {row["_bg"]}'] * len(row)
 
@@ -186,4 +216,4 @@ if f_reg and f_gmp:
             )
             
             csv = final_df.drop(columns=['_bg']).to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 Скачать результат", csv, "audit_result.csv", "text/csv", type="primary")
+            st.download_button("📥 Скачать результат (только ваши препараты)", csv, "checked_18_items.csv", "text/csv", type="primary")
